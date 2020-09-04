@@ -1,0 +1,258 @@
+import requests
+import pandas as pd
+import runpy
+
+requests.packages.urllib3.disable_warnings()
+
+#Credentials in config file
+import configparser
+
+config = configparser.ConfigParser()
+try:
+    with open('BMC_config.ini') as config_file:
+        config.read_file(config_file)
+except Exception:
+    print('file not found')
+
+bg_ServerName = config.get('BMC_creds', 'bg_ServerName')
+bg_UserID = config.get('BMC_creds', 'bg_UserID')
+bg_Password = config.get('BMC_creds', 'bg_Password')
+bg_FormName = config.get('BMC_creds', 'bg_FormName')
+Dataset_Path = config.get('BMC_creds', 'Dataset_Path')
+limit = config.get('BMC_creds', 'limit')
+
+
+#Login into BMC - Token generation
+def doLogin():
+    myToken = ""
+    bgReturnVal = -1
+    url = 'https://' + bg_ServerName + '/api/jwt/login'
+    payload = {'username': bg_UserID, 'password': bg_Password}
+    headers = {'content-type': 'application/x-www-form-urlencoded'}
+    r = requests.post(url, data=payload, headers=headers, verify=False)
+    if r.status_code == 200:
+        myToken = r.text
+        bgReturnVal = 1
+    else:
+        print("Failure...")
+        print("Status Code: " + str(r.status_code))
+        bgReturnVal = -1
+
+    myToken = r.text
+    return(bgReturnVal, myToken)
+    
+    
+#Get incident number based on status and asssigned group
+
+def doPullData_LimitedFields(bg_FormName, bg_Token):
+    bgTokenType = 'AR-JWT'
+    myURL = 'http://' + bg_ServerName + '/api/arsys/v1/entry/' + bg_FormName
+    myHeaders = {'Authorization': bgTokenType + ' ' + bg_Token}
+    bgQuery = ("'Status' = \"Assigned\"" +" AND('Assigned Group' = \"ABC\" OR 'Assigned Group' = \"DEF\")")
+    print(bgQuery)
+    search_params = {'q': bgQuery,'limit':int(limit)}   
+    myR = requests.get(url=myURL, headers=myHeaders, verify=False, params=search_params)
+    print("URL Used:")
+    print(myR.url)
+    print("")
+    if(myR.status_code != 200):
+        print('Status code:', myR.status_code)
+        print('Headers:', myR.headers)
+        print('Error Response:', myR.json())
+        return(-1)
+    bgData = myR.json() 
+    avar = bgData['entries']       
+    worklogDetails={}
+    worklogDetailList=[]
+    for eachEntries in avar:
+        incident=eachEntries["values"]["Incident Number"]
+        summary=eachEntries["values"]["Description"]
+        Assigned_Group = eachEntries["values"]["Assigned Group"]
+        worklogDetails["Incident"]=incident
+        worklogDetails["Description"]=summary
+        worklogDetails["Assigned Group"]=Assigned_Group
+        worklogDetailList.append(worklogDetails.copy())
+    print(worklogDetailList)
+    for m in range(0,len(worklogDetailList)):
+        incid = worklogDetailList[m]["Incident"]
+        summ = worklogDetailList[m]["Description"]
+        Assigned_Grp = worklogDetailList[m]["Assigned Group"]
+    #return incid ,summ ,Assigned_Grp 
+    return worklogDetailList
+
+#Get Incident Details
+
+def getincidentdetails(incident,bg_Token):
+    bgTokenType = 'AR-JWT'
+    bg_FormName ="HPD:Help Desk?"
+    myUrl = 'http://'+ bg_ServerName+'/api/arsys/v1/entry/' + bg_FormName
+    querystring = {"q":"'Incident Number'=\""+incident+"\""}  
+    myHeaders = {'Authorization': bgTokenType + ' ' + bg_Token}
+    print(incident)
+    response = requests.request("GET", url=myUrl, headers=myHeaders, params=querystring)
+    bgData = response.json() 
+    var = bgData['entries']
+    worklogDetails={}
+    worklogDetailList=[]
+    for eachEntries in var:
+        incident=eachEntries["values"]["Incident Number"]
+        summary=eachEntries["values"]["Description"]
+        EntryID = eachEntries["values"]["Entry ID"]
+        Store_No = eachEntries["values"]["Last Name"]
+        worklogDetails["Incident"]=incident
+        worklogDetails["Description"]=summary
+        worklogDetails["Entry ID"]=EntryID
+        worklogDetails["Last Name"]=Store_No
+        worklogDetailList.append(worklogDetails.copy())
+        
+    print(worklogDetailList)
+    for m in range(0,len(worklogDetailList)):
+        incid = worklogDetailList[m]["Incident"]
+        sum = worklogDetailList[m]["Description"]
+        entryid = worklogDetailList[m]["Entry ID"]
+        Store_No = worklogDetailList[m]["Last Name"]
+    return (incid,sum,entryid,Store_No)
+
+
+#Update Incident Number using entry id
+
+def Update_Incident(bgToken,entryID,payload):
+    bgTokenType = 'AR-JWT'
+    myURL = 'https://' + bg_ServerName + '/api/arsys/v1/entry/' + bg_FormName + '/' + entryID
+    print(myURL)
+    myHeaders = {'Authorization': bgTokenType + ' ' + bgToken, 'Content-Type':'application/json'}
+    #payload = "{\n\"values\": {\n\"Status\": \"In Progress\",\n \"Resolution\": \"Test\"\n}\n}"
+    #payload = "{\n\"values\": {\n\"Status\": \"Resolved\",\n\"Resolution Category\": \"Request\",\n \"Resolution\": \"Test\"\n}\n}"
+    print(payload)
+    response = requests.request("PUT", myURL, headers=myHeaders, data = payload)
+    if(response.status_code != 204):
+        print('Status code:', response.status_code)
+        print('Headers:', response.headers)
+        print('Error occured while updating incident')
+    else:
+        print("Incident updated successfully")
+    #print(response.text.encode('utf8'))
+
+#Get code execution ID number and execute code based on summary
+def Filter_Queue_Summary(worklogDetailList,bg_Token):
+    print("Fetching dataset")
+    df = pd.read_csv(Dataset_Path)
+    for m in range(0,len(worklogDetailList)):
+        
+        incid = worklogDetailList[m]["Incident"]
+        summary = worklogDetailList[m]["Description"]
+        print('\n')
+        
+        for index,row in df.iterrows():
+            
+            desc = row['Description']
+            if (desc.find(summary) != -1) :
+                print(row['Description'])
+                print(incid)
+                print(row['SOP_No'])
+                path = row['path']
+                print(path)
+                print("Getting entry ID from incident number")
+                incid,summ,entryid,Store_No = getincidentdetails(incid,bg_Token)
+                #payload = "{\n    \"values\": {\n        \"Status\": \"In Progress\",\n        \"Assigned Group\": \"ABC\",\n        \"Assignee\": \"DEF\"\n    }\n}"
+                print("Updating incident : Updated :" + str(payload))
+                Update_Incident(bg_Token,entryid,payload)
+                print("Updated Status and Assignee Queue of Incident")
+#To get variables in other files also , use global variables
+                global Incidnt_BMC
+                global Desc_BMC
+                global FirstNote_BMC
+                global LatestNote_BMC
+                global StoreNo_BMC
+                global EntryID_BMC
+                global Token_BMC
+                Incidnt_BMC = incid
+                Desc_BMC = summ
+                StoreNo_BMC = Store_No
+                EntryID_BMC = entryid
+                Token_BMC = bg_Token
+                path = "D:\test.py"
+                runpy.run_path(path_name= path)
+                break
+
+#Get WorkLog data's links
+def WorkLogLink(Entry_ID,bgToken):
+    bg_FormName = 'HPD:Help%20Desk'
+    url = 'http://' + bg_ServerName + '/api/arsys/v1/entry/' + bg_FormName + '/' + Entry_ID + '?fields=assoc(HPD:INC:Worklog)'
+    bgTokenType = 'AR-JWT'
+    payload = {}
+    headers = {'Authorization': bgTokenType + ' ' + bgToken, 'Content-Type':'application/json'}
+    myR = requests.request("GET", url, headers=headers, data = payload)
+    if(myR.status_code != 200):
+        print('Status code:', myR.status_code)
+        print('Headers:', myR.headers)
+        print('Error Response:', myR.json())
+        return(-1)
+    bgData = myR.json() 
+    avar = bgData['_links']
+    workdata = avar['assoc-HPD:INC:Worklog']
+    First_Log = workdata[0]
+    latest_Log = workdata[-1]
+    First_Log = First_Log['href']
+    latest_Log = latest_Log['href']
+    return First_Log,latest_Log
+
+#Get worklog data using above result
+def WorkLogData(Log_link,bgToken):
+    URL = Log_link
+    bgTokenType = 'AR-JWT'
+    payload = {}
+    headers = {'Authorization': bgTokenType + ' ' + bgToken, 'Content-Type':'application/json'}
+    myR = requests.request("GET", URL, headers=headers, data = payload)
+    if(myR.status_code != 200):
+        print('Status code:', myR.status_code)
+        print('Headers:', myR.headers)
+        print('Error Response:', myR.json())
+        return(-1)
+    bgData = myR.json()
+    avar = bgData['values']
+    Submitter = avar['Submitter']
+    Submit_Date=avar['Submit Date']
+    Detailed_Desc = avar['Detailed Description']
+    
+    return Submit_Date,Submitter,Detailed_Desc
+
+#Create worklog in an exisitng incident
+def CreateWorkLogNote(Desc,Incident_No,bgToken):
+    bg_FormName= 'HPD:WorkLog/?'
+    bgTokenType = 'AR-JWT'
+    payload = {}
+    url = 'https://' + bg_ServerName + '/api/arsys/v1/entry/' + bg_FormName
+    print(url)
+    payload = "{\r\n  \"values\":{\r\n    \"Submitter\":\"ABC\",\r\n    \"Detailed Description\": \"" + Desc +"\",\r\n    \"Work Log Type\": \"General Information\",\r\n    \"Incident Number\": \""+ Incident_No +"\"\r\n  }\r\n}"
+    print(payload)
+    headers = {'Authorization': bgTokenType + ' ' + bgToken, 'Content-Type':'application/json'}
+    myR = requests.request("POST", url , headers=headers, data = payload)
+    if(myR.status_code != 201):
+        print('Status code:', myR.status_code)
+        print('Headers:', myR.headers)
+        print('Error Response:', myR.json())
+        return(-1)
+    else:
+        print("Work Note Created")
+        
+#Create new Incident number        
+def CreateIncident_BMC(bgToken):
+    bg_FormName= "HPD:IncidentInterface_Create"
+    bgTokenType = 'AR-JWT'
+    payload = {}
+    url = 'https://' + bg_ServerName + '/api/arsys/v1/entry/' + bg_FormName
+    print(url)
+    #url = "https://walgreens-dev-restapi.onbmc.com/api/arsys/v1/entry/HPD:IncidentInterface_Create"
+    payload = "{\n    \"values\": {\n        \"First_Name\": \"ABC\",\n        \"Last_Name\": \"XYZ\",\n        \"Description\": \"test\",\n        \"Impact\": \"1-Extensive/Widespread\",\n        \"Urgency\": \"1-Critical\",\n        \"Status\": \"Assigned\",\n        \"Reported Source\": \"Direct Input\",\n        \"Service_Type\": \"User Service Restoration\",\n        \"z1D_Action\": \"CREATE\",\n        \"Product Categorization Tier 1\": \"Software\",\n        \"Assigned Group\": \"ABC\",\n        \"Assignee\": \"ABC\",\n        \"Assigned Support Organization\": \"Application\",\n        \"Assigned Support Company\": \"ABC\"\n    }\n}"
+    
+    headers = {'Authorization': bgTokenType + ' ' + bgToken, 'Content-Type':'application/json'}
+    myR = requests.request("POST", url , headers=headers, data = payload)
+    if(myR.status_code != 201):
+        print('Status code:', myR.status_code)
+        print('Headers:', myR.headers)
+        print('Error Response:', myR.json())
+        return(-1)
+    else:
+        print("Incident Created Successfully")
+    
